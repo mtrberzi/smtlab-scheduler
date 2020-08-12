@@ -46,13 +46,39 @@ class EventQueueListener(stomp.ConnectionListener):
                         self.schedule_instances(payload["run_id"], payload["instance_ids"])
                     except:
                         logging.exception("exception thrown in schedule_instances()")
+            elif payload['action'] == 'process_results':
+                if 'run_id' not in payload:
+                    logging.error("received 'process_results' action with no 'run_id'")
+                elif 'results' not in payload:
+                    logging.error("received 'process_results' action with no 'results'")
+                else:
+                    results_ok = True
+                    for result in payload['results']:
+                        if 'instance_id' not in result or 'result' not in result or 'stdout' not in result or 'runtime' not in result:
+                            results_ok = False
+                            break
+                    if results_ok:
+                        try:
+                            self.process_results(payload["run_id"], payload["results"])
+                        except:
+                            logging.exception("exception thrown in process_results()")
+                    else:
+                        logging.error("received 'process_results' with invalid 'results' body")    
             else:
                 # unknown action
                 logging.error("received message with unknown action {payload['action']}")
         # success
         self.conn.ack(frame.headers['message-id'], self.subscription_id)
 
+    def process_results(self, run_id, results):
+        logging.info("Processing {} results for run {}".format(len(results), run_id))
+        request_body = list(map(lambda x: {'instance_id': x['instance_id'], 'result': x['result'], 'stdout': x['stdout'], runtime: x['runtime']}, results))
+        r = requests.post(config.SMTLAB_API_ENDPOINT + "/runs/{}/results".format(run_id), json=request_body)
+        r.raise_for_status()
+        # TODO validate responses for each result, possibly scheduling validation jobs
+        
     def schedule_instances(self, run_id, instance_ids):
+        logging.info("Scheduling instances {} for run {}".format(instance_ids, run_id))
         r = requests.get(config.SMTLAB_API_ENDPOINT + "/runs/{}".format(run_id))
         r.raise_for_status()
         run_info = r.json()
@@ -60,7 +86,6 @@ class EventQueueListener(stomp.ConnectionListener):
             dest_queue = 'queue/performance'
         else:
             dest_queue = 'queue/regression'
-        # TODO publish a "no_result" for each instance
         for instance_id in instance_ids:
             # TODO check instance results and see whether this instance has already been run (possibly validating the result if it has)
             pass
@@ -68,6 +93,7 @@ class EventQueueListener(stomp.ConnectionListener):
         self.conn.send(body=json.dumps(body), destination=dest_queue)
         
     def schedule_run(self, id):
+        logging.info("Scheduling run {}".format(id))
         r = requests.get(config.SMTLAB_API_ENDPOINT + "/runs/{}".format(id))
         r.raise_for_status()
         run_info = r.json()
