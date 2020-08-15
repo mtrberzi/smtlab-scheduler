@@ -66,7 +66,7 @@ class EventQueueListener(stomp.ConnectionListener):
                         logging.error("received 'process_results' with invalid 'results' body")    
             else:
                 # unknown action
-                logging.error("received message with unknown action {payload['action']}")
+                logging.error(f"received message with unknown action {payload['action']}")
         # success
         self.conn.ack(frame.headers['message-id'], self.subscription_id)
 
@@ -89,7 +89,7 @@ class EventQueueListener(stomp.ConnectionListener):
         for instance_id in instance_ids:
             # TODO check instance results and see whether this instance has already been run (possibly validating the result if it has)
             pass
-        body = {'action': 'run', 'solver_id': run_info['solver_id'], 'instance_ids': instance_ids, 'arguments': run_info['arguments']}
+        body = {'action': 'run', 'run_id': run_id, 'solver_id': run_info['solver_id'], 'instance_ids': instance_ids, 'arguments': run_info['arguments']}
         self.conn.send(body=json.dumps(body), destination=dest_queue)
         
     def schedule_run(self, id):
