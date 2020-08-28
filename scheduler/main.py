@@ -1,5 +1,5 @@
 import logging
-import stomp
+import boto3
 import json
 import requests
 
@@ -7,25 +7,23 @@ import config
 
 def chunks(lst, n):
     for i in range(0, len(lst), n):
-        yield lst[i:i + n]
+        yield lst[i:i + n]       
 
-class EventQueueListener(stomp.ConnectionListener):
-    def __init__(self, conn, subscription_id):
-        self.conn = conn
-        self.subscription_id = subscription_id
-    
-    def on_error(self, frame):
-        logging.error(f"message queue error: {frame.body}")
-        
-    def on_message(self, frame):
+class Scheduler(object):
+    def __init__(self):
+        logging.basicConfig(level=config.LOG_LEVEL)
+        self.client = boto3.resource('sqs', endpoint_url=config.QUEUE_URL, region_name='elasticmq', aws_access_key_id='x', aws_secret_access_key='x', use_ssl=False)
+
+    def handle_message(self, message):
+        logging.info(f"got message: {message.body}")
         try:
-            payload = json.loads(frame.body)
+            payload = json.loads(message.body)
         except ValueError:
-            logging.error(f"received malformed message: {frame.body}")
-            self.conn.ack(frame.headers['message-id'], self.subscription_id)
+            logging.error(f"received malformed message: {message.body}")
             return
         if 'action' not in payload:
             logging.error("received message with no 'action': {payload}")
+            return
         else:
             if payload['action'] == 'schedule':
                 if 'id' not in payload:
@@ -67,12 +65,10 @@ class EventQueueListener(stomp.ConnectionListener):
             else:
                 # unknown action
                 logging.error(f"received message with unknown action {payload['action']}")
-        # success
-        self.conn.ack(frame.headers['message-id'], self.subscription_id)
 
     def process_results(self, run_id, results):
         logging.info("Processing {} results for run {}".format(len(results), run_id))
-        request_body = list(map(lambda x: {'instance_id': x['instance_id'], 'result': x['result'], 'stdout': x['stdout'], runtime: x['runtime']}, results))
+        request_body = list(map(lambda x: {'instance_id': x['instance_id'], 'result': x['result'], 'stdout': x['stdout'], 'runtime': x['runtime']}, results))
         r = requests.post(config.SMTLAB_API_ENDPOINT + "/runs/{}/results".format(run_id), json=request_body)
         r.raise_for_status()
         # TODO validate responses for each result, possibly scheduling validation jobs
@@ -83,14 +79,15 @@ class EventQueueListener(stomp.ConnectionListener):
         r.raise_for_status()
         run_info = r.json()
         if run_info["performance"]:
-            dest_queue = 'queue/performance'
+            dest_queue = 'performance'
         else:
-            dest_queue = 'queue/regression'
+            dest_queue = 'regression'
         for instance_id in instance_ids:
             # TODO check instance results and see whether this instance has already been run (possibly validating the result if it has)
             pass
         body = {'action': 'run', 'run_id': run_id, 'solver_id': run_info['solver_id'], 'instance_ids': instance_ids, 'arguments': run_info['arguments']}
-        self.conn.send(body=json.dumps(body), destination=dest_queue)
+        queue = self.client.get_queue_by_name(QueueName=dest_queue)
+        queue.send_message(MessageBody=json.dumps(body))
         
     def schedule_run(self, id):
         logging.info("Scheduling run {}".format(id))
@@ -111,28 +108,21 @@ class EventQueueListener(stomp.ConnectionListener):
             batch_size = 15
         else:
             batch_size = 20
+        queue = self.client.get_queue_by_name(QueueName="scheduler")
         for chunk in chunks(run_instances, batch_size):
             instance_ids = [x['id'] for x in chunk]
             # "recursively" schedule this chunk
             chunk_msg = {'action': 'schedule_instances', 'run_id': id, 'instance_ids': instance_ids}
-            self.conn.send(body=json.dumps(chunk_msg), destination='queue/scheduler')
-
-class Scheduler(object):
-    def __init__(self):
-        logging.basicConfig(level=config.LOG_LEVEL)
-        self.subscription_id = 1
-        self.conn = stomp.Connection(config.QUEUE_CONNECTION)
-        self.conn.set_listener('', EventQueueListener(self.conn, self.subscription_id))
-
+            queue.send_message(MessageBody=json.dumps(chunk_msg))
+        
     def run(self):
         logging.info("Starting SMTLab scheduler")
-        self.conn.connect(config.QUEUE_USERNAME, config.QUEUE_PASSWORD, wait=True)
-        logging.info("Connected to queue endpoint")
-        self.conn.subscribe(destination='queue/scheduler', id=self.subscription_id, ack='client-individual')
+        scheduler_queue = self.client.get_queue_by_name(QueueName="scheduler")
         try:
             while True:
-                pass
+                for message in scheduler_queue.receive_messages(MaxNumberOfMessages=1, WaitTimeSeconds=5):
+                    self.handle_message(message)
+                    message.delete()
         except KeyboardInterrupt:
             logging.info("Caught signal, shutting down")
-            self.conn.disconnect()
     
