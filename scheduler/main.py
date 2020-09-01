@@ -61,7 +61,15 @@ class Scheduler(object):
                         except:
                             logging.exception("exception thrown in process_results()")
                     else:
-                        logging.error("received 'process_results' with invalid 'results' body")    
+                        logging.error("received 'process_results' with invalid 'results' body")
+            elif payload['action'] == 'process_validation':
+                if 'result_id' not in payload or 'solver_id' not in payload or 'validation' not in payload or 'stdout' not in payload:
+                    logging.error("received 'process_validation' action with missing required fields")
+                else:
+                    # upload this result
+                    request_body = {'solver_id': payload['solver_id'], 'validation': payload['validation'], 'stdout': payload['stdout']}
+                    r = requests.post(config.SMTLAB_API_ENDPOINT + "/results/{}/validation".format(payload['result_id']))
+                    r.raise_for_status()
             else:
                 # unknown action
                 logging.error(f"received message with unknown action {payload['action']}")
@@ -71,7 +79,11 @@ class Scheduler(object):
         request_body = list(map(lambda x: {'instance_id': x['instance_id'], 'result': x['result'], 'stdout': x['stdout'], 'runtime': x['runtime']}, results))
         r = requests.post(config.SMTLAB_API_ENDPOINT + "/runs/{}/results".format(run_id), json=request_body)
         r.raise_for_status()
-        # TODO validate responses for each result, possibly scheduling validation jobs
+        # the request returns the new result objects, with their IDs...
+        result_info = r.json()
+        for result in result_info:
+            # ...so validate each result that we get back
+            self.schedule_validation(result['id'])
         
     def schedule_instances(self, run_id, instance_ids):
         logging.info("Scheduling instances {} for run {}".format(instance_ids, run_id))
@@ -82,12 +94,82 @@ class Scheduler(object):
             dest_queue = 'performance'
         else:
             dest_queue = 'regression'
+        instance_ids_to_run = []
+        instance_ids_to_validate = []
+        instance_ids_with_results = []
+        r_results = requests.get(config.SMTLAB_API_ENDPOINT + "/runs/{}/results".format(run_id))
+        r_results.raise_for_status()
+        result_info = r_results.json()
+        for result in result_info:
+            instance_ids_with_results.append(result['instance_id'])
         for instance_id in instance_ids:
-            # TODO check instance results and see whether this instance has already been run (possibly validating the result if it has)
-            pass
-        body = {'action': 'run', 'run_id': run_id, 'solver_id': run_info['solver_id'], 'instance_ids': instance_ids, 'arguments': run_info['arguments']}
-        queue = self.client.get_queue_by_name(QueueName=dest_queue)
-        queue.send_message(MessageBody=json.dumps(body))
+            if instance_id in instance_ids_with_results:
+                instance_ids_to_validate.append(instance_id)
+            else:
+                instance_ids_to_run.append(instance_id)
+        if len(instance_ids_to_run) > 0:
+            body = {'action': 'run', 'run_id': run_id, 'solver_id': run_info['solver_id'], 'instance_ids': instance_ids_to_run, 'arguments': run_info['arguments']}
+            queue = self.client.get_queue_by_name(QueueName=dest_queue)
+            queue.send_message(MessageBody=json.dumps(body))
+        for instance_id in instance_ids_to_validate:
+            # map instance ID to its corresponding result ID
+            # TODO this is quadratic, and can probably be optimized
+            for result in result_info:
+                if result['instance_id'] == instance_id:
+                    self.schedule_validation(result['id'])
+
+    def schedule_validation(self, result_id):
+        logging.info("Checking validations for result {}".format(result_id))
+        r = requests.get(config.SMTLAB_API_ENDPOINT + "/results/{}".format(result_id))
+        r.raise_for_status()
+        result_info = r.json()
+        if result_info['result'] == "sat" or result_info['result'] == "unsat":
+            validation_solvers_already_used = [] # only for direct validation of this result - not from other runs
+            validation_solvers_checked = 0
+            validation_solvers_agreeing = 0
+            validation_solvers_disagreeing = 0
+            validation_solvers_inconclusive = 0
+            for validation in result_info['validations']:
+                if 'validation' in validation:
+                    validation_solvers_already_used.append(validation['solver_id'])
+                    validation_solvers_checked += 1
+                    if validation['validation'] == "valid":
+                        validation_solvers_agreeing += 1
+                    elif validation['validation'] == "invalid":
+                        validation_solvers_disagreeing += 1
+                    else:
+                        validation_solvers_inconclusive += 1
+                elif 'result' in validation:
+                    validation_solvers_checked += 1
+                    if validation['result'] == "sat" or validation['result'] == "unsat":
+                        if result_info['result'] == validation['result']:
+                            validation_solvers_agreeing += 1
+                        else:
+                            validation_solvers_disagreeing += 1
+                    else:
+                        validation_solvers_inconclusive += 1
+            logging.info("{} solvers checked, {} agreeing, {} disagreeing, {} inconclusive".format(validation_solvers_checked, validation_solvers_agreeing, validation_solvers_disagreeing, validation_solvers_inconclusive))
+            # now decide whether to run the remaining validation solvers based on the outcome
+            if result_info['result'] == "unsat":
+                return
+            if validation_solvers_disagreeing > 0:
+                return
+            r_solvers = requests.get(config.SMTLAB_API_ENDPOINT + "/solvers")
+            r_solvers.raise_for_status()
+            solver_info = r_solvers.json()
+            validation_solvers = []
+            for solver in solver_info:
+                if solver['validation_solver']:
+                    validation_solvers.append(solver['id'])
+            for v_id in validation_solvers_already_used:
+                validation_solvers.remove(v_id)
+            for v_id in validation_solvers:
+                body = {'action': 'validate', 'result_id': result_id, 'solver_id': v_id}
+                queue = self.client.get_queue_by_name(QueueName="regression")
+                queue.send_message(MessageBody=json.dumps(body))
+        else:
+            logging.info("Result {} is {}, nothing to validate".format(result_id, result_info['result']))
+            return
         
     def schedule_run(self, id):
         logging.info("Scheduling run {}".format(id))
