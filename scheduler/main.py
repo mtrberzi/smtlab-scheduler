@@ -108,9 +108,10 @@ class Scheduler(object):
             else:
                 instance_ids_to_run.append(instance_id)
         if len(instance_ids_to_run) > 0:
-            body = {'action': 'run', 'run_id': run_id, 'solver_id': run_info['solver_id'], 'instance_ids': instance_ids_to_run, 'arguments': run_info['arguments']}
             queue = self.client.get_queue_by_name(QueueName=dest_queue)
-            queue.send_message(MessageBody=json.dumps(body))
+            for instance_id in instance_ids_to_run:
+                body = {'action': 'run', 'run_id': run_id, 'solver_id': run_info['solver_id'], 'instance_id': instance_id, 'arguments': run_info['arguments']}
+                queue.send_message(MessageBody=json.dumps(body))
         for instance_id in instance_ids_to_validate:
             # map instance ID to its corresponding result ID
             # TODO this is quadratic, and can probably be optimized
