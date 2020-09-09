@@ -67,8 +67,8 @@ class Scheduler(object):
                     logging.error("received 'process_validation' action with missing required fields")
                 else:
                     # upload this result
-                    request_body = {'solver_id': payload['solver_id'], 'validation': payload['validation'], 'stdout': payload['stdout']}
-                    r = requests.post(config.SMTLAB_API_ENDPOINT + "/results/{}/validation".format(payload['result_id']))
+                    request_body = [{'solver_id': payload['solver_id'], 'validation': payload['validation'], 'stdout': payload['stdout']}]
+                    r = requests.post(config.SMTLAB_API_ENDPOINT + "/results/{}/validation".format(payload['result_id']), json=request_body)
                     r.raise_for_status()
             else:
                 # unknown action
