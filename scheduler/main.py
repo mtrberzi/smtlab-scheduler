@@ -1,7 +1,7 @@
 import logging
-import boto3
 import json
 import requests
+import time
 
 import config
 
@@ -12,15 +12,9 @@ def chunks(lst, n):
 class Scheduler(object):
     def __init__(self):
         logging.basicConfig(level=config.LOG_LEVEL)
-        self.client = boto3.resource('sqs', endpoint_url=config.QUEUE_URL, region_name='elasticmq', aws_access_key_id='x', aws_secret_access_key='x', use_ssl=False)
 
-    def handle_message(self, message):
+    def handle_message(self, payload):
         logging.info(f"got message: {message.body}")
-        try:
-            payload = json.loads(message.body)
-        except ValueError:
-            logging.error(f"received malformed message: {message.body}")
-            return
         if 'action' not in payload:
             logging.error("received message with no 'action': {payload}")
             return
@@ -108,10 +102,10 @@ class Scheduler(object):
             else:
                 instance_ids_to_run.append(instance_id)
         if len(instance_ids_to_run) > 0:
-            queue = self.client.get_queue_by_name(QueueName=dest_queue)
             for instance_id in instance_ids_to_run:
                 body = {'action': 'run', 'run_id': run_id, 'solver_id': run_info['solver_id'], 'instance_id': instance_id, 'arguments': run_info['arguments']}
-                queue.send_message(MessageBody=json.dumps(body))
+                r = requests.post(config.SMTLAB_API_ENDPOINT + f"/queues/{dest_queue}", json=body, auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
+                r.raise_for_status()
         for instance_id in instance_ids_to_validate:
             # map instance ID to its corresponding result ID
             # TODO this is quadratic, and can probably be optimized
@@ -166,8 +160,8 @@ class Scheduler(object):
                 validation_solvers.remove(v_id)
             for v_id in validation_solvers:
                 body = {'action': 'validate', 'result_id': result_id, 'solver_id': v_id}
-                queue = self.client.get_queue_by_name(QueueName="regression")
-                queue.send_message(MessageBody=json.dumps(body))
+                r = requests.post(config.SMTLAB_API_ENDPOINT + "/queues/regression", json=body, auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
+                r.raise_for_status()
         else:
             logging.info("Result {} is {}, nothing to validate".format(result_id, result_info['result']))
             return
@@ -191,21 +185,33 @@ class Scheduler(object):
             batch_size = 15
         else:
             batch_size = 20
-        queue = self.client.get_queue_by_name(QueueName="scheduler")
         for chunk in chunks(run_instances, batch_size):
             instance_ids = [x['id'] for x in chunk]
             # "recursively" schedule this chunk
             chunk_msg = {'action': 'schedule_instances', 'run_id': id, 'instance_ids': instance_ids}
-            queue.send_message(MessageBody=json.dumps(chunk_msg))
+            r = requests.post(config.SMTLAB_API_ENDPOINT + "/queues/scheduler", json=chunk_msg, auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
+            r.raise_for_status()
         
     def run(self):
         logging.info("Starting SMTLab scheduler")
-        scheduler_queue = self.client.get_queue_by_name(QueueName="scheduler")
+        backoff = 0
         try:
             while True:
-                for message in scheduler_queue.receive_messages(MaxNumberOfMessages=1, WaitTimeSeconds=5):
-                    self.handle_message(message)
-                    message.delete()
+                got_messages = False
+                r = requests.get(config.SMTLAB_API_ENDPOINT + "/queues/scheduler", auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
+                r.raise_for_status()
+                messages = r.json()
+                if messages:
+                    got_message = True
+                    for message in messages:
+                        self.handle_message(message)
+                if got_messages:
+                    backoff = 0
+                else:
+                    time.sleep(0.1 * 2.0 ** backoff)
+                    if backoff < config.QUEUE_BACKOFF_LIMIT:
+                        backoff += 1
+                    
         except KeyboardInterrupt:
             logging.info("Caught signal, shutting down")
     
