@@ -68,7 +68,7 @@ class Scheduler(object):
                 else:
                     # upload this result
                     request_body = [{'solver_id': payload['solver_id'], 'validation': payload['validation'], 'stdout': payload['stdout']}]
-                    r = requests.post(config.SMTLAB_API_ENDPOINT + "/results/{}/validation".format(payload['result_id']), json=request_body)
+                    r = requests.post(config.SMTLAB_API_ENDPOINT + "/results/{}/validation".format(payload['result_id']), json=request_body, auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
                     r.raise_for_status()
             else:
                 # unknown action
@@ -77,7 +77,7 @@ class Scheduler(object):
     def process_results(self, run_id, results):
         logging.info("Processing {} results for run {}".format(len(results), run_id))
         request_body = list(map(lambda x: {'instance_id': x['instance_id'], 'result': x['result'], 'stdout': x['stdout'], 'runtime': x['runtime']}, results))
-        r = requests.post(config.SMTLAB_API_ENDPOINT + "/runs/{}/results".format(run_id), json=request_body)
+        r = requests.post(config.SMTLAB_API_ENDPOINT + "/runs/{}/results".format(run_id), json=request_body, auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
         r.raise_for_status()
         # the request returns the new result objects, with their IDs...
         result_info = r.json()
@@ -87,7 +87,7 @@ class Scheduler(object):
         
     def schedule_instances(self, run_id, instance_ids):
         logging.info("Scheduling instances {} for run {}".format(instance_ids, run_id))
-        r = requests.get(config.SMTLAB_API_ENDPOINT + "/runs/{}".format(run_id))
+        r = requests.get(config.SMTLAB_API_ENDPOINT + "/runs/{}".format(run_id), auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
         r.raise_for_status()
         run_info = r.json()
         if run_info["performance"]:
@@ -97,7 +97,7 @@ class Scheduler(object):
         instance_ids_to_run = []
         instance_ids_to_validate = []
         instance_ids_with_results = []
-        r_results = requests.get(config.SMTLAB_API_ENDPOINT + "/runs/{}/results".format(run_id))
+        r_results = requests.get(config.SMTLAB_API_ENDPOINT + "/runs/{}/results".format(run_id), auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
         r_results.raise_for_status()
         result_info = r_results.json()
         for result in result_info:
@@ -121,7 +121,7 @@ class Scheduler(object):
 
     def schedule_validation(self, result_id):
         logging.info("Checking validations for result {}".format(result_id))
-        r = requests.get(config.SMTLAB_API_ENDPOINT + "/results/{}".format(result_id))
+        r = requests.get(config.SMTLAB_API_ENDPOINT + "/results/{}".format(result_id), auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
         r.raise_for_status()
         result_info = r.json()
         if result_info['result'] == "sat" or result_info['result'] == "unsat":
@@ -155,7 +155,7 @@ class Scheduler(object):
                 return
             if validation_solvers_disagreeing > 0:
                 return
-            r_solvers = requests.get(config.SMTLAB_API_ENDPOINT + "/solvers")
+            r_solvers = requests.get(config.SMTLAB_API_ENDPOINT + "/solvers", auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
             r_solvers.raise_for_status()
             solver_info = r_solvers.json()
             validation_solvers = []
@@ -174,10 +174,10 @@ class Scheduler(object):
         
     def schedule_run(self, id):
         logging.info("Scheduling run {}".format(id))
-        r = requests.get(config.SMTLAB_API_ENDPOINT + "/runs/{}".format(id))
+        r = requests.get(config.SMTLAB_API_ENDPOINT + "/runs/{}".format(id), auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
         r.raise_for_status()
         run_info = r.json()
-        r2 = requests.get(config.SMTLAB_API_ENDPOINT + "/benchmarks/{}/instances".format(run_info['benchmark_id']))
+        r2 = requests.get(config.SMTLAB_API_ENDPOINT + "/benchmarks/{}/instances".format(run_info['benchmark_id']), auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
         r2.raise_for_status()
         run_instances = r2.json()
         # choose a batch size based on the total number of instances
