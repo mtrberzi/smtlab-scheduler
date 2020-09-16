@@ -14,7 +14,7 @@ class Scheduler(object):
         logging.basicConfig(level=config.LOG_LEVEL)
 
     def handle_message(self, payload):
-        logging.info(f"got message: {message.body}")
+        logging.info(f"got message: {payload}")
         if 'action' not in payload:
             logging.error("received message with no 'action': {payload}")
             return
@@ -157,7 +157,8 @@ class Scheduler(object):
                 if solver['validation_solver']:
                     validation_solvers.append(solver['id'])
             for v_id in validation_solvers_already_used:
-                validation_solvers.remove(v_id)
+                if v_id in validation_solvers:
+                    validation_solvers.remove(v_id)
             for v_id in validation_solvers:
                 body = {'action': 'validate', 'result_id': result_id, 'solver_id': v_id}
                 r = requests.post(config.SMTLAB_API_ENDPOINT + "/queues/regression", json=body, auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
@@ -204,7 +205,11 @@ class Scheduler(object):
                 if messages:
                     got_message = True
                     for message in messages:
-                        self.handle_message(message)
+                        try:
+                            payload = json.loads(message)
+                            self.handle_message(payload)
+                        except json.JSONDecodeError:
+                            logging.error(f"Error decoding message {message}")
                 if got_messages:
                     backoff = 0
                 else:
