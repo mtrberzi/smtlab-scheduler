@@ -1,3 +1,5 @@
 from . import main
 
-scheduler = main.Scheduler()
+def run_scheduler():
+    scheduler = main.Scheduler()
+    scheduler.run()

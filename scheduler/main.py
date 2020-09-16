@@ -202,8 +202,8 @@ class Scheduler(object):
                 r = requests.get(config.SMTLAB_API_ENDPOINT + "/queues/scheduler", auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
                 r.raise_for_status()
                 messages = r.json()
-                if messages:
-                    got_message = True
+                if len(messages) > 0:
+                    got_messages = True
                     for message in messages:
                         try:
                             payload = json.loads(message)
@@ -215,6 +215,7 @@ class Scheduler(object):
                 else:
                     time.sleep(0.1 * 2.0 ** backoff)
                     if backoff < config.QUEUE_BACKOFF_LIMIT:
+                        logging.info(f"No messages, backing off (n={backoff})")
                         backoff += 1
                     
         except KeyboardInterrupt:
