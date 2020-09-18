@@ -1,7 +1,10 @@
 import os
 import logging
 
-SMTLAB_API_ENDPOINT = os.environ.get('SMTLAB_API_ENDPOINT') or 'http://127.0.0.1:5000'
+SMTLAB_API_ENDPOINT = os.environ.get('SMTLAB_API_ENDPOINT') or 'http://127.0.0.1:5000/'
+if SMTLAB_API_ENDPOINT[-1] != '/':
+    SMTLAB_API_ENDPOINT += "/"
+
 QUEUE_BACKOFF_LIMIT = 8
 LOG_LEVEL = logging.INFO
 SMTLAB_USERNAME = os.environ.get('SMTLAB_USERNAME')

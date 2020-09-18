@@ -2,8 +2,26 @@ import logging
 import json
 import requests
 import time
+from requests_toolbelt import sessions
+from requests.exceptions import RetryError
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
 
 import config
+
+class TimeoutHTTPAdapter(HTTPAdapter):
+    def __init__(self, *args, **kwargs):
+        self.timeout = 5 # seconds
+        if "timeout" in kwargs:
+            self.timeout = kwargs['timeout']
+            del kwargs['timeout']
+        super().__init__(*args, **kwargs)
+
+    def send(self, request, **kwargs):
+        timeout = kwargs.get('timeout')
+        if timeout is None:
+            kwargs['timeout'] = self.timeout
+        return super().send(request, **kwargs)
 
 def chunks(lst, n):
     for i in range(0, len(lst), n):
@@ -12,6 +30,14 @@ def chunks(lst, n):
 class Scheduler(object):
     def __init__(self):
         logging.basicConfig(level=config.LOG_LEVEL)
+        self.http = sessions.BaseUrlSession(base_url=config.SMTLAB_API_ENDPOINT)
+        retry_strategy = Retry(total=5, method_whitelist=["HEAD", "GET", "PUT", "POST", "OPTIONS"], status_forcelist=[429, 500, 502, 503, 504], backoff_factor=1)
+        adapter=TimeoutHTTPAdapter(max_retries=retry_strategy)
+        self.http.mount("http://", adapter)
+        self.http.mount("https://", adapter)
+        self.http.auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD)
+        assert_status_hook = lambda response, *args, **kwargs: response.raise_for_status()
+        self.http.hooks['response'] = [assert_status_hook]
 
     def handle_message(self, payload):
         logging.info(f"got message: {payload}")
@@ -62,8 +88,7 @@ class Scheduler(object):
                 else:
                     # upload this result
                     request_body = [{'solver_id': payload['solver_id'], 'validation': payload['validation'], 'stdout': payload['stdout']}]
-                    r = requests.post(config.SMTLAB_API_ENDPOINT + "/results/{}/validation".format(payload['result_id']), json=request_body, auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
-                    r.raise_for_status()
+                    self.http.post(f"results/{payload['result_id']}/validation", json=request_body)
             else:
                 # unknown action
                 logging.error(f"received message with unknown action {payload['action']}")
@@ -71,8 +96,7 @@ class Scheduler(object):
     def process_results(self, run_id, results):
         logging.info("Processing {} results for run {}".format(len(results), run_id))
         request_body = list(map(lambda x: {'instance_id': x['instance_id'], 'result': x['result'], 'stdout': x['stdout'], 'runtime': x['runtime']}, results))
-        r = requests.post(config.SMTLAB_API_ENDPOINT + "/runs/{}/results".format(run_id), json=request_body, auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
-        r.raise_for_status()
+        self.http.post(f"runs/{run_id}/results", json=request_body)
         # the request returns the new result objects, with their IDs...
         result_info = r.json()
         for result in result_info:
@@ -81,8 +105,7 @@ class Scheduler(object):
         
     def schedule_instances(self, run_id, instance_ids):
         logging.info("Scheduling instances {} for run {}".format(instance_ids, run_id))
-        r = requests.get(config.SMTLAB_API_ENDPOINT + "/runs/{}".format(run_id), auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
-        r.raise_for_status()
+        r = self.http.get(f"runs/{run_id}")
         run_info = r.json()
         if run_info["performance"]:
             dest_queue = 'performance'
@@ -91,8 +114,7 @@ class Scheduler(object):
         instance_ids_to_run = []
         instance_ids_to_validate = []
         instance_ids_with_results = []
-        r_results = requests.get(config.SMTLAB_API_ENDPOINT + "/runs/{}/results".format(run_id), auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
-        r_results.raise_for_status()
+        r_results = self.http.get(f"runs/{run_id}/results")
         result_info = r_results.json()
         for result in result_info:
             instance_ids_with_results.append(result['instance_id'])
@@ -104,8 +126,7 @@ class Scheduler(object):
         if len(instance_ids_to_run) > 0:
             for instance_id in instance_ids_to_run:
                 body = {'action': 'run', 'run_id': run_id, 'solver_id': run_info['solver_id'], 'instance_id': instance_id, 'arguments': run_info['arguments']}
-                r = requests.post(config.SMTLAB_API_ENDPOINT + f"/queues/{dest_queue}", json=body, auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
-                r.raise_for_status()
+                self.http.post(f"queues/{dest_queue}", json=body)
         for instance_id in instance_ids_to_validate:
             # map instance ID to its corresponding result ID
             # TODO this is quadratic, and can probably be optimized
@@ -115,8 +136,7 @@ class Scheduler(object):
 
     def schedule_validation(self, result_id):
         logging.info("Checking validations for result {}".format(result_id))
-        r = requests.get(config.SMTLAB_API_ENDPOINT + "/results/{}".format(result_id), auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
-        r.raise_for_status()
+        r = self.http.get(f"results/{result_id}")
         result_info = r.json()
         if result_info['result'] == "sat" or result_info['result'] == "unsat":
             validation_solvers_already_used = [] # only for direct validation of this result - not from other runs
@@ -149,8 +169,7 @@ class Scheduler(object):
                 return
             if validation_solvers_disagreeing > 0:
                 return
-            r_solvers = requests.get(config.SMTLAB_API_ENDPOINT + "/solvers", auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
-            r_solvers.raise_for_status()
+            r_solvers = self.http.get("solvers")
             solver_info = r_solvers.json()
             validation_solvers = []
             for solver in solver_info:
@@ -161,19 +180,16 @@ class Scheduler(object):
                     validation_solvers.remove(v_id)
             for v_id in validation_solvers:
                 body = {'action': 'validate', 'result_id': result_id, 'solver_id': v_id}
-                r = requests.post(config.SMTLAB_API_ENDPOINT + "/queues/regression", json=body, auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
-                r.raise_for_status()
+                self.http.post("queues/regression", json=body)
         else:
             logging.info("Result {} is {}, nothing to validate".format(result_id, result_info['result']))
             return
         
     def schedule_run(self, id):
         logging.info("Scheduling run {}".format(id))
-        r = requests.get(config.SMTLAB_API_ENDPOINT + "/runs/{}".format(id), auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
-        r.raise_for_status()
+        r = self.http.get(f"runs/{id}")
         run_info = r.json()
-        r2 = requests.get(config.SMTLAB_API_ENDPOINT + "/benchmarks/{}/instances".format(run_info['benchmark_id']), auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
-        r2.raise_for_status()
+        r2 = self.http.get(f"/benchmarks/{run_info['benchmark_id']}/instances")
         run_instances = r2.json()
         # choose a batch size based on the total number of instances
         if len(run_instances) <= 10:
@@ -190,33 +206,34 @@ class Scheduler(object):
             instance_ids = [x['id'] for x in chunk]
             # "recursively" schedule this chunk
             chunk_msg = {'action': 'schedule_instances', 'run_id': id, 'instance_ids': instance_ids}
-            r = requests.post(config.SMTLAB_API_ENDPOINT + "/queues/scheduler", json=chunk_msg, auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
-            r.raise_for_status()
+            self.http.post("queues/scheduler", json=chunk_msg)
         
     def run(self):
         logging.info("Starting SMTLab scheduler")
         backoff = 0
         try:
             while True:
-                got_messages = False
-                r = requests.get(config.SMTLAB_API_ENDPOINT + "/queues/scheduler", auth=(config.SMTLAB_USERNAME, config.SMTLAB_PASSWORD))
-                r.raise_for_status()
-                messages = r.json()
-                if len(messages) > 0:
-                    got_messages = True
-                    for message in messages:
-                        try:
-                            payload = json.loads(message)
-                            self.handle_message(payload)
-                        except json.JSONDecodeError:
-                            logging.error(f"Error decoding message {message}")
-                if got_messages:
-                    backoff = 0
-                else:
-                    time.sleep(0.1 * 2.0 ** backoff)
-                    if backoff < config.QUEUE_BACKOFF_LIMIT:
-                        logging.info(f"No messages, backing off (n={backoff})")
-                        backoff += 1
+                try:
+                    got_messages = False
+                    r = self.http.get("queues/scheduler")
+                    messages = r.json()
+                    if len(messages) > 0:
+                        got_messages = True
+                        for message in messages:
+                            try:
+                                payload = json.loads(message)
+                                self.handle_message(payload)
+                            except json.JSONDecodeError:
+                                logging.error(f"Error decoding message {message}")
+                    if got_messages:
+                        backoff = 0
+                    else:
+                        time.sleep(0.1 * 2.0 ** backoff)
+                        if backoff < config.QUEUE_BACKOFF_LIMIT:
+                            logging.info(f"No messages, backing off (n={backoff})")
+                            backoff += 1
+                except RetryError as e:
+                    logging.error(f"Cancelled request due to maximum retry limit being reached -- check API server status: {e}")
                     
         except KeyboardInterrupt:
             logging.info("Caught signal, shutting down")
