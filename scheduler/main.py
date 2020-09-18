@@ -87,7 +87,7 @@ class Scheduler(object):
                     logging.error("received 'process_validation' action with missing required fields")
                 else:
                     # upload this result
-                    request_body = [{'solver_id': payload['solver_id'], 'validation': payload['validation'], 'stdout': payload['stdout']}]
+                    request_body = [{'solver_id': payload['solver_id'], 'validation': payload['validation'], 'stdout': payload['stdout'], 'node_name': payload.get('node_name', "")}]
                     self.http.post(f"results/{payload['result_id']}/validation", json=request_body)
             else:
                 # unknown action
@@ -95,8 +95,8 @@ class Scheduler(object):
 
     def process_results(self, run_id, results):
         logging.info("Processing {} results for run {}".format(len(results), run_id))
-        request_body = list(map(lambda x: {'instance_id': x['instance_id'], 'result': x['result'], 'stdout': x['stdout'], 'runtime': x['runtime']}, results))
-        self.http.post(f"runs/{run_id}/results", json=request_body)
+        request_body = list(map(lambda x: {'instance_id': x['instance_id'], 'result': x['result'], 'stdout': x['stdout'], 'runtime': x['runtime'], 'node_name': x.get('node_name', "")}, results))
+        r = self.http.post(f"runs/{run_id}/results", json=request_body)
         # the request returns the new result objects, with their IDs...
         result_info = r.json()
         for result in result_info:
@@ -189,7 +189,7 @@ class Scheduler(object):
         logging.info("Scheduling run {}".format(id))
         r = self.http.get(f"runs/{id}")
         run_info = r.json()
-        r2 = self.http.get(f"/benchmarks/{run_info['benchmark_id']}/instances")
+        r2 = self.http.get(f"benchmarks/{run_info['benchmark_id']}/instances")
         run_instances = r2.json()
         # choose a batch size based on the total number of instances
         if len(run_instances) <= 10:
